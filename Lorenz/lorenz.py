@@ -14,6 +14,7 @@ from keras.models import Sequential, load_model
 from keras.layers import InputLayer, Dense #, Lambda
 from tensorflow.keras import backend as K
 from sklearn.metrics import explained_variance_score as evs
+import pandas as pd
 import pickle
 #import pandas as pd
 #import time
@@ -27,16 +28,16 @@ from box import Box
 #pip install python-box
 start_time = time.time() 
 # Configuration
-t0, t1, gap= 0, 100, 800  #step size 0.05
-sampling = 600
+t0, t1, gap= 0, 20, 1000  #step size 0.05
+sampling = 800
 
 sigma, beta, rho = 10.0, 8.0/3.0, 28.0 # Standard Lorenz parameters
-y0=[0.96, -1.1, 0.5]
+y0=[1, 1, 1]
 y0_shift=[0.98, -1.11, 0.6]
 
 #layers = np.array([1,3,2]) 
-N_f = 100
-epochs = 50
+N_f = 200
+epochs = 10
 batch_size = 8
 
 a=0.25
@@ -49,6 +50,7 @@ def make_data():
     data ={
            'y0': y0,   
            'numerical_sol': [],
+           'num_sol_shift': [],
            
            't':np.linspace(t0, t1, gap),
            't_train':[],
@@ -128,8 +130,36 @@ def get_numerical_sol(data,
         ):
     sol = scint.solve_ivp(fun, t_span, y0, method, t_eval, args=(sigma, beta, rho))
     
+    # Extract data
+    t = sol.t
+    x = sol.y[0, :]
+    y = sol.y[1, :]
+    z = sol.y[2,:]
+    
+    # Save to CSV
+    df = pd.DataFrame({
+        't': t,
+        'x': x,
+        'y': y,
+        'z': z
+    })
+   
+    df.to_csv('lorenz_data.csv', index=False)
+    
     data['numerical_sol'] = sol   #(3,100)
     return sol
+
+def get_num_sol_shift(data,
+        fun=RHS,
+        t_span=(t0, t1),
+        y0=y0,
+        method="LSODA",  # "BDF", "LSODA", "DOP853"
+        t_eval=np.linspace(t0, t1, gap)
+        ):
+    sol_shift = scint.solve_ivp(fun, t_span, y0_shift, method, t_eval, args=(sigma, beta, rho))
+    
+    data['num_sol_shift'] = sol_shift   #(3,100)
+    return sol_shift
 
 def prepare_input_data(data, N_f):
     t = data['t']
@@ -187,7 +217,7 @@ def setting_model(data):
     model.add(Dense(64, activation=tf.keras.activations.gelu, kernel_initializer="glorot_normal", dtype=tf.float64))
     model.add(Dense(32, activation=tf.keras.activations.gelu, kernel_initializer="glorot_normal", dtype=tf.float64))
     model.add(Dense(16, activation=tf.keras.activations.gelu, kernel_initializer="glorot_normal", dtype=tf.float64))
-    model.add(Dense(8, activation=tf.keras.activations.gelu, kernel_initializer="glorot_uniform", dtype=tf.float64))
+    model.add(Dense(8, activation=tf.keras.activations.gelu, kernel_initializer="glorot_normal", dtype=tf.float64))
     model.add(Dense(3, activation=None, kernel_initializer="glorot_normal",dtype=tf.float64))
 
     model.summary()
@@ -250,9 +280,9 @@ def setting_model(data):
         #f1 = dx_dt - dxdt_rhs 
         #f2 = dy_dt - dydt_rhs
 
-        loss_f = tf.reduce_mean(tf.square(f1)+tf.square(f2))
+        loss_f = tf.reduce_mean(tf.square(f1)+tf.square(f2)+tf.square(f3))
  
-        loss = loss_ic + loss_f
+        loss = tf.cast(loss_ic, tf.float32) + tf.cast(loss_f, tf.float32) 
         
         tf.print('loss on ic is:', loss_ic)
         tf.print('loss on ODE is:', loss_f)
@@ -272,7 +302,14 @@ def setting_model(data):
     x_test = sol.y.T[0]
     y_test = sol.y.T[1]
     z_test = sol.y.T[2]
-    model.fit(t_to_array, y_to_fit, batch_size,epochs, validation_data = (x_test, y_test, z_test))
+    history = model.fit(t_to_array, y_to_fit, batch_size,epochs, validation_data = (x_test, y_test, z_test))
+    
+    fig, ax1 = plt.subplots(1, 1, figsize=(8, 5))
+    ax1.semilogy(history.history['loss'], label='log_loss')
+    ax1.set_xlabel('number of iteration')#, fontdict=font)
+    ax1.set_ylabel('loss value')#, fontdict=font)
+    ax1.legend(loc='upper right')  
+    fig.savefig('lorenz_logloss.png', dpi=300)
     
     #model.save('recode_spiral_model.h5')
     
@@ -311,13 +348,14 @@ def setting_model(data):
         f_all2 = tf.reduce_mean(tf.square(dy_dt - ddt_all[:,0]))
         f_all3 = tf.reduce_mean(tf.square(dz_dt - ddt_all[:,0]))
         
-        loss_fall = f_all1 + f_all2 + f_all3
-
+        #loss_fall = f_all1 + f_all2 + f_all3
+        loss_fall = tf.cast(f_all1, tf.float32) + tf.cast(f_all2, tf.float32) + tf.cast(f_all3, tf.float32)
+        
         print('Derivatives loss on testing data dxdt', f_all1)
         print('Derivatives loss on testing data dydt',f_all2)
         print('Derivatives loss on testing data dzdt',f_all3)
         print('Data loss', ic_all)
-        print('Total testing data loss', loss_fall + ic_all)
+        #print('Total testing data loss', loss_fall + ic_all)
      
     model.save('lorenz_model.keras')
     
@@ -467,14 +505,21 @@ def visualize(data):
     plt.show()
     fig.savefig('lorenz_pinn.png', dpi=300)
     
-    #fig,ax5 = plt.subplots(1,1)
-    #fig.suptitle("comparison", fontsize=12)
-    #ax5.plot(t_f, numerical_neighbour.y[0,:],label='RK45_x')
-    #ax5.plot(t_f, numerical_neighbour.y[1,:],label='RK45_y')
-    #ax5.plot(t_f, numerical_neighbour.y[2,:],label='RK45_z')
-    #ax5.plot(t_f, u_pred[:,0],label='RK45_x')
-    #ax5.plot(t_f, u_pred[:,1],label='RK45_y')
-    #ax5.plot(t_f, u_pred[:,2],label='RK45_z')
+    fig = plt.figure(figsize=(8, 6))
+    ax7 = fig.add_subplot(111)
+    x, y, z = data.numerical_sol.y
+    ax7.plot(x, z, lw=0.6, color='blue', label='Data(LSODA)')
+    x1 = u_test[:, 0]
+    y1 = u_test[:, 1]
+    z1 = u_test[:, 2]
+    ax7.plot(x1, z1, linestyle='--', color='red', label='Data(PINNs)')
+    ax7.set_xlabel("x",fontsize=12)
+    ax7.set_ylabel("z",fontsize=12)
+    ax7.legend()
+    ax7.set_title("Lorenz x–z Projection", fontsize=12)
+    plt.tight_layout()
+    plt.savefig('lorenz_re.png', dpi=300)
+    plt.show()
     
     #ax5.legend(loc='upper left')
     #ax5.plot(u_pred[:,2],'x',label='PINNs_z')
